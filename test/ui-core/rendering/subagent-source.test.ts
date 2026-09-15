@@ -40,6 +40,16 @@ describe("subagent presentation", () => {
     expect(text).not.toContain("✓");
   });
 
+  it("keeps multiline tool inputs on one logical activity line", () => {
+    const text = formatSubagentRun(run([
+      { kind: "tool", text: `Calling shell.exec: ${JSON.stringify({ command: "pwd\n\ncat /workspace/file.ts\r\n\tgit status", timeoutMs: 40000 })}` },
+      { kind: "tool", text: "Success: done" },
+      { kind: "notice", text: "Next activity" },
+    ]));
+    expect(text).toContain("✓ shell.exec pwd\\n\\ncat /workspace/file.ts\\r\\n\\tgit status (timeoutMs=40000)\nNotice: Next activity");
+    expect(text).not.toContain("pwd\n");
+  });
+
   it("presents streamed and final reports once without duplicating error notices", () => {
     const report = "Status: complete\n## Findings\nOne finding with evidence.";
     const text = formatSubagentRun(run([

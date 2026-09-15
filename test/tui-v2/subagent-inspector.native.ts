@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { writeFile } from "node:fs/promises";
 import { act, createElement } from "react";
 import { testRender } from "@opentui/react/test-utils";
-import { RGBA } from "@opentui/core";
+import { RGBA, type Renderable } from "@opentui/core";
 import { SubagentManager } from "../../src/agent/subagents/manager.js";
 import type { SubagentWorkerInput } from "../../src/agent/subagents/types.js";
 import { createTurnOutcome } from "../../src/agent/turn-outcome.js";
@@ -116,7 +116,36 @@ try {
   assertColor("web.fetch", "cyan");
   assertColor("✗", "diffDel");
   assertColor("Notice:", "activity");
-  if (process.env.CLAI_SUBAGENT_CAPTURE_PATH) await writeFile(process.env.CLAI_SUBAGENT_CAPTURE_PATH, activityFrame);
+  const command = `printf 'line one'\n\ncat /workspace/${"source/".repeat(8)}example.ts\n git status --short`;
+  await waitForFrame(/COMMAND FINISHED/, () => {
+    const worker = workers.get(first.id)!;
+    worker.emit({ kind: "tool", text: `Calling shell.exec: ${JSON.stringify({ command, timeoutMs: 40000 })}` });
+    worker.emit({ kind: "tool", text: "Success: command output" });
+    worker.emit({ kind: "notice", text: "COMMAND FINISHED" });
+  });
+  for (const width of [64, 32, 120]) {
+    await settle(() => setup.resize(width, 40));
+    for (const mode of ["r", "f"]) {
+      const frame = await settle(() => setup.mockInput.pressKey(mode));
+      const visit = (node: Renderable): void => {
+        if (node.id.startsWith("pager-line-")) assert.equal(node.height, 1, `${node.id} must occupy exactly one physical row`);
+        for (const child of node.getChildren()) visit(child);
+      };
+      visit(setup.renderer.root);
+      assert.match(frame, /COMMAND FINISHED/);
+      const compactRows = frame.replace(/[│\s]/g, "");
+      assert.match(compactRows, /example\.ts/);
+      assert.match(compactRows, /gitstatus--short/);
+      const rows = frame.split("\n");
+      const start = rows.findIndex((row) => row.includes("shell.exec"));
+      const end = rows.findIndex((row) => row.includes("COMMAND FINISHED"));
+      assert.ok(start >= 0 && end > start);
+      assert.ok(rows.slice(start, end).every((row) => row.replace(/[│\s]/g, "").length > 0));
+    }
+  }
+  const compactFrame = setup.captureCharFrame();
+  assert.match(compactFrame, /\\n\\ncat/);
+  if (process.env.CLAI_SUBAGENT_CAPTURE_PATH) await writeFile(process.env.CLAI_SUBAGENT_CAPTURE_PATH, compactFrame);
   await settle(() => setup.mockInput.pressEscape());
   assert.equal(services.overlay.getState().kind, "picker");
   const frame = await waitForFrame(/SECOND LIVE FINDING/, () => {

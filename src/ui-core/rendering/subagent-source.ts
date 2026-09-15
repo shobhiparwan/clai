@@ -10,16 +10,21 @@ function assistantText(text: string): string {
   return text.replace(/```tool\b[^\n]*\n?[\s\S]*?(?:```|$)/gi, "").trim();
 }
 
+function inlineArgument(value: unknown): string {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return (text ?? String(value)).replace(/\r/g, "\\r").replace(/\n/g, "\\n").replace(/\t/g, "\\t");
+}
+
 function toolCall(text: string): string | undefined {
   const match = /^Calling ([\w.-]+):\s*([\s\S]*)$/.exec(text);
   if (!match) return undefined;
   let args: unknown;
-  try { args = JSON.parse(match[2]!); } catch { return `→ ${match[1]} ${match[2]}`; }
-  if (!args || typeof args !== "object" || Array.isArray(args)) return `→ ${match[1]} ${match[2]}`;
+  try { args = JSON.parse(match[2]!); } catch { return `→ ${match[1]} ${inlineArgument(match[2])}`; }
+  if (!args || typeof args !== "object" || Array.isArray(args)) return `→ ${match[1]} ${inlineArgument(match[2])}`;
   const fields = Object.entries(args);
   const target = fields.find(([key]) => key === "path" || key === "url" || key === "command");
   const options = fields.filter(([key]) => key !== target?.[0]).map(([key, value]) => `${key}=${JSON.stringify(value)}`);
-  return `→ ${match[1]}${target ? ` ${String(target[1])}` : ""}${options.length ? ` (${options.join(", ")})` : ""}`;
+  return `→ ${match[1]}${target ? ` ${inlineArgument(target[1])}` : ""}${options.length ? ` (${options.join(", ")})` : ""}`;
 }
 
 function activity(run: SubagentRun): string[] {

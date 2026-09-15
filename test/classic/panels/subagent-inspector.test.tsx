@@ -16,6 +16,8 @@ it("renders readable subagent activity and one evidence report in Classic", asyn
       { sequence: 1, timestamp: 1, kind: "tool", text: 'Calling fs.read: {"path":"src/agent/subagents/worker.ts","offset":81,"limit":80}' },
       { sequence: 2, timestamp: 2, kind: "tool", text: "Success: PRIVATE_FILE_BODY_MUST_NOT_APPEAR" },
       { sequence: 3, timestamp: 3, kind: "assistant", text: report },
+      { sequence: 4, timestamp: 4, kind: "tool", text: `Calling shell.exec: ${JSON.stringify({ command: "pwd\n\ncat /workspace/file.ts\n git status --short" })}` },
+      { sequence: 5, timestamp: 5, kind: "tool", text: "Success: done" },
     ],
     report,
   };
@@ -29,6 +31,7 @@ it("renders readable subagent activity and one evidence report in Classic", asyn
     expect(frame).toContain(colorInk.fg("success", "✓ ").replace(/\x1b\[39m\x1b\[0m$/, ""));
     expect(frame).toContain("src/agent/subagents/worker.ts");
     expect(frame).toContain("offset=81, limit=80");
+    expect(frame).toContain("pwd\\n\\ncat /workspace/file.ts\\n git status --short");
     expect(frame).not.toContain("PRIVATE_FILE_BODY_MUST_NOT_APPEAR");
     expect(frame.match(/The worker delegates/g)).toHaveLength(1);
     expect(frame).toContain("No live provider was contacted.");
