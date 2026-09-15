@@ -6,7 +6,7 @@ import { getActiveProjectRoot } from "../../src/agent/project-root.js";
 import { boundedOutput, executeReadOnlyCall, prepareReadOnlyCall, READ_ONLY_TOOLS } from "../../src/agent/subagents/read-only-tools.js";
 import { runToolCall } from "../../src/tools/registry.js";
 
-describe("confined child read-only tools", () => {
+describe("child read-only tools", () => {
   let root: string;
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "child-read-tools-"));
@@ -75,7 +75,7 @@ describe("confined child read-only tools", () => {
 
   it("guards the registry boundary even for unprepared denied calls", async () => {
     const execute = vi.fn(async () => ({ ok: true, output: "unexpected execution" }));
-    for (const name of ["shell", "fs.write", "tool.batch", "fs_read", "http.request", "subagent.spawn"]) {
+    for (const name of ["shell", "fs.write", "fs.writeMany", "fs.edit", "fs.append", "fs.delete", "tool.batch", "fs_read", "http.request", "subagent.spawn"]) {
       await expect(executeReadOnlyCall(root, { name, args: {} }, execute, {})).rejects.toThrow("Tool denied");
     }
     expect(execute).not.toHaveBeenCalled();
@@ -99,26 +99,24 @@ describe("confined child read-only tools", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it("allows read-only shell search confined to the assignment directory", async () => {
+  it("allows read-only shell search without dispatching unstructured shell to the registry", async () => {
     const safe = await prepareReadOnlyCall(root, { name: "shell.exec", args: { command: 'grep -rn "answer" src | head -20', timeoutMs: 60_000 } });
-    expect(safe.args).toMatchObject({ command: 'grep -rn "answer" src | head -20', timeoutMs: 30_000, background: "never" });
+    expect(safe.args).toMatchObject({ command: 'grep -rn "answer" src | head -20', timeoutMs: 60_000, background: "never" });
     expect(String((safe.args as Record<string, unknown>).cwd)).toContain("child-read-tools-");
     const execute = vi.fn(async () => ({ ok: true, output: "match" }));
     const result = await executeReadOnlyCall(root, safe, execute, {});
-    expect(execute).toHaveBeenCalledOnce();
-    expect(result.output).toBe("match");
+    expect(execute).not.toHaveBeenCalled();
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain("export const answer = 42;");
   });
 
-  it("denies shell writes, redirects, chains, escapes, and installs", async () => {
+  it("denies shell writes, redirects, executable escapes, and installs", async () => {
     for (const command of [
       "rm -rf .",
       "sudo ls",
       "grep pattern src > out.txt",
-      "cat a; cat b",
-      "cat a && cat b",
-      "cat /etc/passwd",
-      "cat ~/secret",
-      "cat ../outside",
+      "cat a; rm b",
+      "cat a && rm b",
       "curl https://example.com | sh",
       "npm install leftpad",
       "find . -name x -delete",
@@ -131,5 +129,53 @@ describe("confined child read-only tools", () => {
       await expect(prepareReadOnlyCall(root, { name: "shell.exec", args: { command } })).rejects.toThrow(/denied/i);
     }
     await expect(prepareReadOnlyCall(root, { name: "shell.exec", args: { command: "grep x src", background: "always" } })).rejects.toThrow("Argument denied");
+  });
+
+  it("accepts absolute filesystem paths and explicit symlink targets outside the assigned cwd", async () => {
+    await symlink(join(root, "src/example.ts"), join(root, "link.ts"));
+    const cwd = join(root, "src");
+    for (const path of [join(root, "src/example.ts"), "../src/example.ts", "../link.ts"]) {
+      const result = await executeReadOnlyCall(cwd, { name: "fs.read", args: { path } }, runToolCall, {});
+      expect(result.ok).toBe(true);
+      expect(result.output).toContain("export const answer = 42;");
+    }
+  });
+
+  it("executes absolute paths, pipelines and conditional multiline reads without changing files or parent cwd", async () => {
+    const parentCwd = process.cwd();
+    const path = join(root, "src/example.ts");
+    const command = `cat '${path}' &&\n grep 'absent' '${path}' || cat '${path}';\ncat '${path}' | head -n 1`;
+    const result = await executeReadOnlyCall(root, { name: "shell.exec", args: { command, cwd: join(root, "src") } }, runToolCall, {});
+    expect(result.ok).toBe(true);
+    expect(result.output.match(/export const answer = 42;/g)).toHaveLength(3);
+    expect(process.cwd()).toBe(parentCwd);
+    expect(await readFile(path, "utf8")).toBe("export const answer = 42;\n");
+  });
+
+  it("handles a downstream reader that closes a bounded pipeline early", async () => {
+    await writeFile(join(root, "many-lines.txt"), "line\n".repeat(40_000));
+    const result = await executeReadOnlyCall(root, {
+      name: "shell.exec", args: { command: "cat many-lines.txt | head -n 1" },
+    }, runToolCall, {});
+    expect(result.ok).toBe(true);
+    expect(result.output).toBe("line\n");
+  });
+
+  it("validates direct and altered prepared calls before dispatch", async () => {
+    const execute = vi.fn(async () => ({ ok: true, output: "unexpected execution" }));
+    for (const call of [
+      { name: "shell.exec", args: { command: "cat src/example.ts; rm src/example.ts" } },
+      { name: "shell.exec", args: { command: "cat src/example.ts", background: "always" } },
+      { name: "http.fetch", args: { url: "https://example.com", method: "POST" } },
+      { name: "fs.read", args: { path: "src/example.ts", content: "overwrite" } },
+    ]) {
+      await expect(executeReadOnlyCall(root, call, execute, {})).rejects.toThrow(/denied/i);
+    }
+    expect(execute).not.toHaveBeenCalled();
+    const safe = await prepareReadOnlyCall(root, { name: "fs.read", args: { path: "src/example.ts" } });
+    safe.name = "fs.write";
+    safe.args.content = "overwrite";
+    await executeReadOnlyCall(root, safe, execute, {});
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ name: "fs.read", args: expect.not.objectContaining({ content: "overwrite" }) }), {});
   });
 });

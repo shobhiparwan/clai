@@ -619,9 +619,20 @@ Children have no fixed concurrency, step, or assignment-time budget. By default,
 they inherit the parent's provider/model and project root; a configured subagent
 model chain selects a primary execution route and fallbacks without changing the
 assignment identity. Children retain independent histories and stable cache
-prefixes. Their only tools are confined file reads/listings/searches and web
-search/fetch; shell, editing, MCP, arbitrary HTTP actions, and further delegation
-are unavailable. Provider context and transport safety limits still apply. Context
+prefixes. Children can inspect files by absolute path or relative to their assigned
+cwd, including relevant dependencies outside that directory, and use bounded web,
+HTTP GET, PDF, image, skill and system-inspection tools. Their read-only shell
+supports explicit paths, an optional cwd, pipelines, and commands joined by
+semicolons, newlines, `&&` or `||`. Every stage is validated before anything runs;
+commands execute as literal argument vectors, not through a shell. Pipelines are
+buffered and capped at 1 MiB between stages, with one timeout for the complete call.
+Sort spill files use a private temporary directory cleaned after execution; Git
+inspection disables optional index writes, configured helpers and network fetching.
+Editing, deletion, writes, redirects, shell expansion, arbitrary interpreters,
+installs, background jobs, MCP and further delegation remain unavailable. General
+Python/Node execution is not a read-only capability; use filesystem tools and the
+supported inspection commands instead. This is an inspection-command policy, not
+an OS sandbox for untrusted executables. Provider context and transport safety limits still apply. Context
 compaction retains evidence and continues research without displaying internal
 partial reports as deliverables.
 
