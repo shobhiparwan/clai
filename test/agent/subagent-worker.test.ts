@@ -122,6 +122,8 @@ describe("isolated read-only subagent worker", () => {
   it.each([
     call("shell.exec", { command: "rm -rf ." }),
     call("fs.write", { path: "src/example.ts", content: "overwrite" }),
+    call("fs.delete", { path: "src/example.ts" }),
+    call("fs.edit", { path: "src/example.ts", oldText: "answer", newText: "changed" }),
     call("http.fetch", { url: "https://example.com", method: "POST" }),
     call("tool.batch", { calls: [{ name: "tool.batch", args: { calls: [{ name: "fs.read", args: { path: "src/example.ts" } }] } }] }),
     call("mcp.remote.write", {}),
@@ -136,17 +138,16 @@ describe("isolated read-only subagent worker", () => {
   });
 
   it.each([
-    call("fs.read", { path: "../outside.txt" }),
     call("fs.search", { path: ".", pattern: "private", fileList: ["../outside.txt"] }),
     call("fs.search", { path: ".", pattern: "private", followSymlinks: true }),
     call("fs.search", { path: ".", pattern: "private", symlinks: true }),
-  ])("blocks traversal and unvalidated search options: $args", async (malicious) => {
+  ])("blocks unvalidated search options: $args", async (malicious) => {
     vi.mocked(streamWithProvider).mockResolvedValueOnce(completion("", [malicious])).mockResolvedValueOnce(completion());
     await runReadOnlySubagent(input);
     expect(runToolCall).not.toHaveBeenCalled();
   });
 
-  it("blocks absolute outside paths and escaping symlinks, including recursive search", async () => {
+  it("allows explicit absolute and symlink reads while recursive search still skips symlinks", async () => {
     await symlink(join(temporary, "outside.txt"), join(cwd, "src/escape"));
     vi.mocked(streamWithProvider).mockResolvedValueOnce(completion("", [
       call("fs.read", { path: join(temporary, "outside.txt") }, "a"),
@@ -154,7 +155,13 @@ describe("isolated read-only subagent worker", () => {
       call("fs.search", { path: "src", pattern: "private" }, "c"),
     ])).mockResolvedValueOnce(completion());
     await runReadOnlySubagent(input);
-    expect(runToolCall).not.toHaveBeenCalled();
+    expect(runToolCall).toHaveBeenCalledTimes(3);
+    const calls = vi.mocked(runToolCall).mock.calls.map(([call]) => call);
+    expect(calls.slice(0, 2)).toEqual([
+      expect.objectContaining({ name: "fs.read", args: expect.objectContaining({ path: join(temporary, "outside.txt") }) }),
+      expect.objectContaining({ name: "fs.read", args: expect.objectContaining({ path: join(temporary, "outside.txt") }) }),
+    ]);
+    expect(calls[2]).toMatchObject({ name: "fs.search", args: { path: join(cwd, "src/example.ts") } });
   });
 
   it("supports fenced tools with stable schemas in text mode", async () => {

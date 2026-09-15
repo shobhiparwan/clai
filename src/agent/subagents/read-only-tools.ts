@@ -1,9 +1,11 @@
 import { lstat, opendir, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { relative, resolve } from "node:path";
 import { TOOL_DEFINITIONS } from "../../tools/definitions.js";
 import { globToPathRegExp } from "../../tools/fs/search.js";
 import type { ToolRunOptions } from "../../tools/tool-types.js";
 import type { ToolCall, ToolDefinition, ToolResult } from "../../types.js";
+import { parseReadOnlyShell } from "./read-only-shell.js";
+import { executeReadOnlyShell } from "./read-only-shell-execution.js";
 
 export const TOOL_OUTPUT_LIMIT = 12_000;
 const fields: Record<string, readonly string[]> = {
@@ -21,25 +23,25 @@ const fields: Record<string, readonly string[]> = {
   "wordlist.find": ["query", "expand"],
   "skill.load": ["name"],
   "skill.list": ["query"],
-  "shell.exec": ["command", "timeoutMs"],
+  "shell.exec": ["command", "cwd", "timeoutMs"],
 };
 
 const descriptions: Record<string, string> = {
-  "fs.read": "Read a text file inside cwd with numbered lines. At most 300 lines and 12000 characters per call. Files over 2 MiB need parent inspection.",
-  "fs.list": "List directory entries inside cwd.",
-  "fs.search": "Bounded content search inside cwd returning matching file paths only. Skips symlinks, generated directories, and files over 1 MB; scans at most 64 files.",
+  "fs.read": "Read a text file by absolute path or relative to cwd, with numbered lines. At most 300 lines and 12000 characters per call. Files over 2 MiB need parent inspection.",
+  "fs.list": "List directory entries by absolute path or relative to cwd.",
+  "fs.search": "Bounded content search by absolute path or relative to cwd returning matching file paths only. Skips symlinks, generated directories, and files over 1 MB; scans at most 64 files.",
   "web.search": "Search the web for current information.",
   "web.fetch": "Fetch a public URL as readable text.",
   "http.fetch": "GET-only HTTP evidence for public targets. Mutating or authenticated requests are denied.",
-  "pdf.read": "Extract text from a PDF inside cwd with bounded paging.",
-  "image.view": "View image bytes for a file inside cwd.",
-  "image.ocr": "OCR text from an image file inside cwd.",
+  "pdf.read": "Extract text from a PDF by absolute path or relative to cwd with bounded paging.",
+  "image.view": "View image bytes by absolute path or relative to cwd.",
+  "image.ocr": "OCR text from an image by absolute path or relative to cwd.",
   "sysinfo": "OS and environment facts.",
   "tool.check": "Check tool availability on PATH.",
   "wordlist.find": "Locate wordlists on disk.",
   "skill.load": "Read one skill's instructions.",
   "skill.list": "List installed skills.",
-  "shell.exec": "Read-only shell fallback for search and inspection when file search is insufficient. Writes, redirects, chaining, and installs are denied.",
+  "shell.exec": "Read-only inspection with absolute or relative paths and optional cwd. Supports pipelines and multiple commands separated by semicolons, newlines, && or ||. Every command is validated before execution. Use literal arguments; writes, redirects, expansions, background jobs, interpreters and installs are denied.",
 };
 
 export const READ_ONLY_TOOLS: ToolDefinition[] = TOOL_DEFINITIONS
@@ -66,21 +68,11 @@ export function boundedOutput(text: string): string {
     : text;
 }
 
-function inside(root: string, path: string): boolean {
-  const rel = relative(root, path);
-  return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`));
-}
-
-export async function confinedPath(root: string, value: unknown = "."): Promise<string> {
+async function resolveReadPath(root: string, value: unknown = "."): Promise<string> {
   if (typeof value !== "string" || !value.trim() || value.includes("\0") || value !== value.trim()) {
     throw new Error("Invalid path");
   }
-  const canonicalRoot = await realpath(root);
-  const path = resolve(canonicalRoot, value);
-  if (!inside(canonicalRoot, path)) throw new Error("Path is outside the assigned cwd");
-  const canonical = await realpath(path);
-  if (!inside(canonicalRoot, canonical)) throw new Error("Symlink resolves outside the assigned cwd");
-  return canonical;
+  return realpath(resolve(await realpath(root), value));
 }
 
 function number(args: Record<string, unknown>, key: string, fallback: number, max: number, min = 1): number {
@@ -129,87 +121,12 @@ function stringList(value: unknown, key: string, min: number, max: number, itemM
   });
 }
 
-const SHELL_FIRST_ALLOW = new Set([
-  "grep", "egrep", "fgrep", "rg", "ag", "ack",
-  "find", "ls", "dir", "cat", "head", "tail", "wc",
-  "sort", "uniq", "cut", "tr", "file", "stat", "du",
-  "git", "python3", "python", "node", "jq",
-  "diff", "cmp", "comm", "strings", "xxd", "od",
-]);
-
-const GIT_READ_SUBCOMMANDS = new Set([
-  "grep", "log", "show", "diff", "status", "ls-files",
-  "blame", "rev-parse", "ls-tree", "cat-file",
-]);
-
-const SHELL_CONTENT_DENY: readonly RegExp[] = [
-  /-delete\b/, /-exec(dir)?\b/, /-ok\b/, /-fls\b/, /-fprint\b/,
-  /subprocess/, /os\.system/, /os\.popen/, /os\.exec\w*\b/, /os\.spawn\w*\b/,
-  /os\.remove/, /os\.unlink/, /os\.rmdir/, /os\.mkdir/, /os\.rename/, /os\.replace/,
-  /os\.chmod/, /os\.chown/, /os\.symlink/, /os\.link/, /os\.truncate/, /os\.write/,
-  /os\.environ/, /getenv/, /shutil/, /socket/, /urllib/, /requests/, /http\.client/,
-  /ftplib/, /smtplib/, /telnetlib/, /child_process/, /process\.env/,
-  /require\s*\(\s*['"]fs['"]\s*\)/, /from\s+['"]fs['"]/, /import\s*\(\s*['"]fs['"]/,
-  /writefilesync/, /appendfilesync/, /mkdirsync/, /rmsync/, /unlinksync/, /rmdirsync/,
-  /renamesync/, /chmodsync/, /chownsync/, /truncatesync/, /createwritestream/,
-  /write_text/, /write_bytes/, /__import__/, /getattr\s*\(/, /setattr\s*\(/, /delattr\s*\(/,
-  /globals\s*\(/, /locals\s*\(/, /compile\s*\(/, /\beval\s*\(/, /\bexec\s*\(/,
-  /\binput\s*\(/, /\bfetch\s*\(/, /o_wronly/, /o_rdwr/, /o_creat/,
-  /ld_preload/, /ld_library_path/, /pythonpath/, /pythonhome/, /node_options/,
-  /open\s*\([^,]+,\s*['"][^'"]*[wax+]/,
-];
-
-function stripQuoted(command: string): string {
-  let out = "";
-  let quote = "";
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i]!;
-    if (quote) {
-      if (ch === "\\") i++;
-      else if (ch === quote) quote = "";
-      out += " ";
-    } else if (ch === "'" || ch === '"') {
-      quote = ch;
-      out += " ";
-    } else if (ch === "\\") {
-      i++;
-      out += " ";
-    } else out += ch;
-  }
-  return out;
-}
-
-function denyShellStructure(visible: string): void {
-  if (/`|\$\(|\$\{/.test(visible)) throw new Error("Command denied: shell expansion is not allowed");
-  if (/[><]/.test(visible)) throw new Error("Command denied: redirection is not allowed");
-  if (/[;&]/.test(visible)) throw new Error("Command denied: run one command per call without chaining");
-  if (/(^|[\s"'=:(,])\.\.(\/|\\|$|["'\s])/.test(visible)) throw new Error("Command denied: paths must stay inside the assignment directory");
-  if (/(^|[\s"'=:(,])~(\/|$)/.test(visible)) throw new Error("Command denied: home-directory paths are not allowed");
-  if (/(^|[\s"'=:(,])\//.test(visible)) throw new Error("Command denied: absolute paths are not allowed");
-}
-
-function denyShellContent(lower: string): void {
-  if (SHELL_CONTENT_DENY.some((pattern) => pattern.test(lower))) throw new Error("Command denied: mutating, network, or environment access is not allowed");
-}
-
-function assertShellSegment(segment: string): void {
-  const tokens = segment.trim().split(/\s+/).filter(Boolean);
-  const first = tokens[0]?.toLowerCase();
-  if (!first || !SHELL_FIRST_ALLOW.has(first)) throw new Error("Command denied: use a read-only search or inspection command");
-  if (first === "git" && !GIT_READ_SUBCOMMANDS.has(tokens[1]?.toLowerCase() ?? "")) throw new Error("Command denied: only read-only git subcommands are allowed");
-  if (first === "find" && /-(delete|exec(dir)?|ok|fls|fprint)\b/.test(segment)) throw new Error("Command denied: find may not modify or execute");
-  if (first === "sort" && /-o\b|--output\b/.test(segment)) throw new Error("Command denied: sort may not write files");
-}
-
 async function prepareShellExec(root: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const raw = string(args, "command", 4000).trim();
-  if (!raw) throw new Error("Invalid command");
-  if (/[\r\n]/.test(raw)) throw new Error("Command denied: run one command per call without line breaks");
-  const visible = stripQuoted(raw);
-  denyShellStructure(visible);
-  denyShellContent(raw.toLowerCase());
-  for (const segment of visible.split("|")) assertShellSegment(segment);
-  return { command: raw, cwd: await confinedPath(root, "."), timeoutMs: number(args, "timeoutMs", 15_000, 30_000), background: "never" };
+  const command = string(args, "command", 16_000);
+  parseReadOnlyShell(command);
+  const cwd = await resolveReadPath(root, args.cwd);
+  if (!(await lstat(cwd)).isDirectory()) throw new Error("cwd must be a directory");
+  return { command, cwd, timeoutMs: number(args, "timeoutMs", 40_000, 1_800_000), background: "never" };
 }
 
 function publicUrl(value: unknown, maxBytesFallback: number): { url: string; maxBytes: number; timeoutMs: number } {
@@ -221,7 +138,7 @@ function publicUrl(value: unknown, maxBytesFallback: number): { url: string; max
 
 async function prepareFsRead(root: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
   if (args.path === undefined) throw new Error("fs.read requires path");
-  const path = await confinedPath(root, args.path);
+  const path = await resolveReadPath(root, args.path);
   const offset = number(args, "offset", number(args, "startLine", 1, 10_000_000), 10_000_000, 0) || 1;
   const limit = number(args, "limit", 200, 300);
   const end = number(args, "endLine", offset + limit - 1, 10_000_300);
@@ -230,12 +147,12 @@ async function prepareFsRead(root: string, args: Record<string, unknown>): Promi
 }
 
 async function prepareFsList(root: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
-  return { path: await confinedPath(root, args.path), maxEntries: number(args, "maxEntries", 100, 200) };
+  return { path: await resolveReadPath(root, args.path), maxEntries: number(args, "maxEntries", 100, 200) };
 }
 
 async function prepareFsSearch(root: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
   const safe: Record<string, unknown> = {
-    path: await confinedPath(root, args.path), pattern: string(args, "pattern"),
+    path: await resolveReadPath(root, args.path), pattern: string(args, "pattern"),
     maxMatches: number(args, "maxMatches", 30, 100),
     maxPerFile: 1, context: 0, filesOnly: true,
     timeoutMs: number(args, "timeoutMs", 2000, 2000),
@@ -268,7 +185,7 @@ function prepareHttpFetch(args: Record<string, unknown>): Record<string, unknown
 }
 
 async function preparePdfRead(root: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const safe: Record<string, unknown> = { path: await confinedPath(root, args.path) };
+  const safe: Record<string, unknown> = { path: await resolveReadPath(root, args.path) };
   const first = optionalNumber(args, "firstPage", 500, 1);
   if (first !== undefined) safe.firstPage = first;
   const last = optionalNumber(args, "lastPage", 500, 1);
@@ -287,18 +204,16 @@ async function prepareImageView(root: string, args: Record<string, unknown>): Pr
   const hasPaths = args.paths !== undefined;
   if (!hasPath && !hasPaths) throw new Error("image.view requires path or paths");
   const safe: Record<string, unknown> = {};
-  if (hasPath) safe.path = await confinedPath(root, args.path);
+  if (hasPath) safe.path = await resolveReadPath(root, args.path);
   if (hasPaths) {
     const paths = stringList(args.paths, "paths", 1, 4, 4096);
-    const confined: string[] = [];
-    for (const entry of paths) confined.push(await confinedPath(root, entry));
-    safe.paths = confined;
+    safe.paths = await Promise.all(paths.map((entry) => resolveReadPath(root, entry)));
   }
   return safe;
 }
 
 async function prepareImageOcr(root: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const safe: Record<string, unknown> = { path: await confinedPath(root, args.path) };
+  const safe: Record<string, unknown> = { path: await resolveReadPath(root, args.path) };
   const lang = optionalString(args, "lang", 64);
   if (lang !== undefined) safe.lang = lang;
   const psm = optionalNumber(args, "psm", 13, 0);
@@ -328,7 +243,7 @@ function prepareSkillList(args: Record<string, unknown>): Record<string, unknown
   return query === undefined ? {} : { query };
 }
 
-export async function prepareReadOnlyCall(root: string, call: ToolCall): Promise<ToolCall> {
+async function normalizeReadOnlyCall(root: string, call: ToolCall): Promise<ToolCall> {
   const allowed = fields[call.name];
   if (!Object.hasOwn(fields, call.name) || !allowed) throw new Error(`Tool denied: ${call.name}`);
   if (!call.args || typeof call.args !== "object" || Array.isArray(call.args)) throw new Error("Invalid tool arguments");
@@ -356,30 +271,27 @@ export async function prepareReadOnlyCall(root: string, call: ToolCall): Promise
   }
 }
 
+const preparedCalls = new WeakMap<ToolCall, ToolCall>();
+
+export async function prepareReadOnlyCall(root: string, call: ToolCall): Promise<ToolCall> {
+  const original = structuredClone(preparedCalls.get(call) ?? call);
+  const prepared = await normalizeReadOnlyCall(root, original);
+  preparedCalls.set(prepared, original);
+  return prepared;
+}
+
 export type ReadOnlyRegistry = (call: ToolCall, options: ToolRunOptions) => Promise<ToolResult>;
 const excluded = new Set([".git", ".hg", ".svn", "node_modules", "dist", "build", "out", "target", "coverage", ".next", ".venv", "__pycache__"]);
 
-async function confineViewPaths(root: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const safe: Record<string, unknown> = { ...args };
-  if (args.path !== undefined) safe.path = await confinedPath(root, args.path);
-  if (args.paths !== undefined) {
-    const confined: string[] = [];
-    for (const entry of args.paths as string[]) confined.push(await confinedPath(root, entry));
-    safe.paths = confined;
-  }
-  return safe;
-}
-
 export async function executeReadOnlyCall(root: string, call: ToolCall, execute: ReadOnlyRegistry, options: ToolRunOptions): Promise<ToolResult> {
   options.signal?.throwIfAborted();
-  if (!Object.hasOwn(fields, call.name)) throw new Error(`Tool denied: ${call.name}`);
+  call = await normalizeReadOnlyCall(root, preparedCalls.get(call) ?? call);
+  if (call.name === "shell.exec") {
+    const result = await executeReadOnlyShell(String(call.args.command), String(call.args.cwd), Number(call.args.timeoutMs), options);
+    return { ...result, output: boundedOutput(result.output) };
+  }
   if (call.name !== "fs.search") {
-    let safe = call;
-    if (call.name.startsWith("fs.") || call.name === "pdf.read" || call.name === "image.ocr") {
-      safe = { ...call, args: { ...call.args, path: await confinedPath(root, call.args.path) } };
-    } else if (call.name === "image.view") {
-      safe = { ...call, args: await confineViewPaths(root, call.args) };
-    }
+    const safe = call;
     if (safe.name === "fs.read") {
       const stat = await lstat(String(safe.args.path));
       if (!stat.isFile() && !stat.isDirectory()) throw new Error("Only regular files and directories are readable");
@@ -408,7 +320,6 @@ export async function executeReadOnlyCall(root: string, call: ToolCall, execute:
     entries += 1;
     const stat = await lstat(path);
     if (stat.isSymbolicLink()) return;
-    await confinedPath(root, path);
     if (stat.isFile()) {
       const rel = relative(start, path) || relative(root, path);
       if (stat.size <= 1_048_576 && (!matcher || matcher.test(rel) !== glob!.startsWith("!"))) files.push(path);
@@ -421,10 +332,7 @@ export async function executeReadOnlyCall(root: string, call: ToolCall, execute:
           break;
         }
         entries += 1;
-        if (entry.isSymbolicLink()) {
-          await confinedPath(root, resolve(path, entry.name));
-          continue;
-        }
+        if (entry.isSymbolicLink()) continue;
         if (excluded.has(entry.name) || (!call.args.hidden && entry.name.startsWith("."))) continue;
         await collect(resolve(path, entry.name), depth + 1);
       }
@@ -437,7 +345,7 @@ export async function executeReadOnlyCall(root: string, call: ToolCall, execute:
   let matched = 0;
   for (const file of files) {
     options.signal?.throwIfAborted();
-    const path = await confinedPath(root, file);
+    const path = await resolveReadPath(root, file);
     if (!(await lstat(path)).isFile()) throw new Error("Search target is no longer a regular file");
     options.signal?.throwIfAborted();
     const { glob: _glob, ...args } = call.args;

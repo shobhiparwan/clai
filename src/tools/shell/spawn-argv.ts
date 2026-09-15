@@ -34,6 +34,7 @@ export interface SpawnArgvArgs {
   noArtifact?: boolean | undefined;
   stdinText?: string | undefined;
   interactiveStdin?: boolean | "auto" | undefined;
+  env?: NodeJS.ProcessEnv | undefined;
 }
 
 export async function spawnArgv(args: SpawnArgvArgs): Promise<ToolResult> {
@@ -76,9 +77,15 @@ export async function spawnArgv(args: SpawnArgvArgs): Promise<ToolResult> {
       detached: detached && !usingInteractiveStdin,
       shell: false,
       stdio,
-      env: { ...process.env, PATH: augmentedPathEnv() },
+      env: { ...process.env, PATH: augmentedPathEnv(), ...args.env },
     });
-    if (args.stdinText !== undefined) child.stdin?.end(args.stdinText);
+    let stdinError: Error | undefined;
+    if (args.stdinText !== undefined) {
+      child.stdin?.on("error", (error: NodeJS.ErrnoException) => {
+        if (error.code !== "EPIPE") stdinError = error;
+      });
+      child.stdin?.end(args.stdinText);
+    }
     let aborted = false;
     let timedOut = false;
     let timeout: NodeJS.Timeout | undefined;
@@ -243,6 +250,16 @@ export async function spawnArgv(args: SpawnArgvArgs): Promise<ToolResult> {
           exitCode: 137,
           ...(artifact ? { outputPath: artifact.path } : {}),
           truncated: true,
+          stats,
+        });
+        return;
+      }
+      if (stdinError) {
+        finalize({
+          ok: false,
+          output: `${output}\nFailed to write command input: ${stdinError.message}`,
+          exitCode: code || 1,
+          ...(artifact ? { outputPath: artifact.path } : {}),
           stats,
         });
         return;
