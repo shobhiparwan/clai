@@ -110,10 +110,11 @@ export function PagerLine(props: {
   if (subagentSpans) {
     return (
       <text
+        key="subagent"
         id={`pager-line-${index}`}
         selectable
-        wrapMode="word"
-        style={{ width: "100%", bg: theme.background }}
+        wrapMode="none"
+        style={{ width: "100%", height: 1, flexShrink: 0, bg: theme.background }}
       >
         {subagentSpans.map((span, i) => (
           <span key={i} style={{ fg: theme[span.fg], attributes: span.bold ? TextAttributes.BOLD : 0 }}>
@@ -129,11 +130,12 @@ export function PagerLine(props: {
     if (!hasQuery && styled) {
       return (
         <text
+          key="markdown-styled"
           id={`pager-line-${index}`}
           content={styled}
           selectable
-          wrapMode="word"
-          style={{ width: "100%", bg: theme.background }}
+          wrapMode="none"
+          style={{ width: "100%", height: 1, flexShrink: 0, bg: theme.background }}
         />
       );
     }
@@ -143,12 +145,15 @@ export function PagerLine(props: {
       matches.some((m) => m.line === index);
     return (
       <text
+        key="markdown-plain"
         id={`pager-line-${index}`}
         content={body}
         selectable
-        wrapMode="word"
+        wrapMode="none"
         style={{
           width: "100%",
+          height: 1,
+          flexShrink: 0,
           fg: isActiveLine ? theme.background : theme.foreground,
           ...(isActiveLine
             ? {
@@ -277,8 +282,11 @@ export function PagerLine(props: {
       <text
         id={`pager-line-${index}`}
         selectable
+        wrapMode="none"
         style={{
           width: "100%",
+          height: 1,
+          flexShrink: 0,
           fg: baseFg,
           bg: isActiveLine ? theme.rowA : theme.background,
         }}
@@ -293,8 +301,11 @@ export function PagerLine(props: {
     <text
       id={`pager-line-${index}`}
       selectable
+      wrapMode="none"
       style={{
         width: "100%",
+        height: 1,
+        flexShrink: 0,
         fg: baseFg,
         bg: isActiveLine ? theme.rowA : theme.background,
       }}

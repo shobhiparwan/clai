@@ -35,7 +35,7 @@ export function preparePagerDisplay(
   const body = options.body ?? "";
   const width = Math.max(24, options.width);
 
-  if (mode === "plain") {
+  if (mode === "plain" || options.width < 24) {
     return { mode: "plain", lines: plainLines(body) };
   }
 

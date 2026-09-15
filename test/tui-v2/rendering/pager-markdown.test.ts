@@ -72,6 +72,12 @@ describe("looksLikeMarkdown", () => {
 });
 
 describe("preparePagerDisplay", () => {
+  it("leaves very narrow viewports to the physical row wrapper without losing text", () => {
+    const body = "# Activity\n✓ shell.exec cat /workspace/long-path/source.ts";
+    const display = preparePagerDisplay({ body, width: 12, mode: "force" });
+    expect(display.mode).toBe("plain");
+    expect(display.lines.map((line) => line.plain).join("\n")).toBe(body);
+  });
   it("force-renders markdown without throwing", () => {
     const body = formatShortcutsReference();
     const prep = preparePagerDisplay({
